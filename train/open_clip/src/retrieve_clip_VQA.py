@@ -10,7 +10,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 
-from training.data import HarvardDataset,HarvardVQADataset
+from training.data import HarvardDataset,HarvardVQADataset, IUXrayVQADataset_with_conf
 import debugpy
 def retrieve_topk_per_image(logits, val_k_list,retrieve_threshold=''):
     
@@ -104,14 +104,18 @@ def main(args):
     model.eval()
     tokenizer = open_clip.get_tokenizer(args.model_name_or_path)
 
-    train_dataset = HarvardDataset(
+
+#  IUXrayVQADataset_with_conf(Dataset):  # TODO
+  #
+    train_dataset = IUXrayVQADataset_with_conf(
         args.img_root,
         args.train_json,
         preprocess,
         tokenizer,
-        load_include_path=True,
+        # load_include_path=True,
+        config_type=args.config_type,
     )
-    eval_dataset = HarvardVQADataset(
+    eval_dataset = IUXrayVQADataset_with_conf(
         args.img_root,
         args.eval_jsonl,
         preprocess,

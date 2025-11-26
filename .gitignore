@@ -10,3 +10,9 @@ train/dpo/playground
 train/dpo/docs
 train/dpo/wandb
 train/open_clip/README.md
+iu_xray
+checkpoints
+.vscode
+requirements.txt
+pmc_data
+caption_T060_filtered_top4_sep_v0_subfigures

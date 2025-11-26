@@ -25,12 +25,12 @@ import torch
 import transformers
 from torchvision import transforms
 import sys
-
+from llava.train.train import preprocess_mpt
 
 from llava.constants import (
     IGNORE_INDEX,
     IMAGE_TOKEN_INDEX,
-    DEFAULT_IMAGE_TOKEN,·
+    DEFAULT_IMAGE_TOKEN,
     DEFAULT_IM_START_TOKEN,
     DEFAULT_IM_END_TOKEN,
 )
@@ -52,6 +52,10 @@ from PIL import ImageFilter
 import wandb
 from tqdm import tqdm
 import warnings
+from llava.model.language_model.llava_llama import LlavaLlamaForCausalLM, LlavaConfig
+from llava.model.language_model.llava_mpt import LlavaMptForCausalLM, LlavaMptConfig
+from llava.model.language_model.llava_mistral import LlavaMistralForCausalLM, LlavaMistralConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -1018,7 +1022,7 @@ def train():
                 model_args.model_name_or_path, trust_remote_code=True
             )
             config.attn_config["attn_impl"] = training_args.mpt_attn_impl
-            model = LlavaMPTForCausalLM.from_pretrained(
+            model = LlavaMptForCausalLM.from_pretrained( #LlavaMptForCausalLM
                 model_args.model_name_or_path,
                 config=config,
                 cache_dir=training_args.cache_dir,
@@ -1218,7 +1222,7 @@ def train():
                 model_args.model_name_or_path, trust_remote_code=True
             )
             config.attn_config["attn_impl"] = training_args.mpt_attn_impl
-            model_ref = LlavaMPTForCausalLM.from_pretrained(
+            model_ref = LlavaMptForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 config=config,
                 cache_dir=training_args.cache_dir,

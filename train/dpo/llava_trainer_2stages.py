@@ -2,17 +2,20 @@ import os
 import torch
 
 from torch.utils.data import Sampler
-
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+import torch.nn as nn
 from transformers import Trainer
 from transformers.trainer import (
     is_sagemaker_mp_enabled,
     get_parameter_names,
     has_length,
-    ALL_LAYERNORM_LAYERS,
-    ShardedDDPOption,
+    # ALL_LAYERNORM_LAYERS,
+    # ShardedDDPOption,
     logger,
 )
 from typing import List, Optional
+
+from torch.utils.data import DataLoader, Dataset
 # from trl import DPOTrainer
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -132,7 +135,7 @@ class LengthGroupedSampler(Sampler):
 from dpo_trainer_2stages import DPOTrainer
 class LLaVATrainer(DPOTrainer):
 
-    def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
+    def _get_train_sampler(self, train_dataset: Optional[Dataset] = None) -> Optional[torch.utils.data.Sampler]:
         if self.train_dataset is None or not has_length(self.train_dataset):
             return None
 
@@ -145,7 +148,7 @@ class LLaVATrainer(DPOTrainer):
                 group_by_modality=True,
             )
         else:
-            return super()._get_train_sampler()
+            return super()._get_train_sampler(train_dataset)
 
     def create_optimizer(self):
         """
@@ -156,8 +159,8 @@ class LLaVATrainer(DPOTrainer):
         """
         if is_sagemaker_mp_enabled():
             return super().create_optimizer()
-        if self.sharded_ddp == ShardedDDPOption.SIMPLE:
-            return super().create_optimizer()
+        # if self.sharded_ddp == ShardedDDPOption.SIMPLE:
+        #     return super().create_optimizer()
 
         opt_model = self.model
 
@@ -212,27 +215,27 @@ class LLaVATrainer(DPOTrainer):
 
             optimizer_cls, optimizer_kwargs = DPOTrainer.get_optimizer_cls_and_kwargs(self.args)
 
-            if self.sharded_ddp == ShardedDDPOption.SIMPLE:
-                self.optimizer = OSS(
-                    params=optimizer_grouped_parameters,
-                    optim=optimizer_cls,
-                    **optimizer_kwargs,
-                )
-            else:
-                self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
-                if optimizer_cls.__name__ == "Adam8bit":
-                    import bitsandbytes
+            # if self.sharded_ddp == ShardedDDPOption.SIMPLE:
+            #     self.optimizer = OSS(
+            #         params=optimizer_grouped_parameters,
+            #         optim=optimizer_cls,
+            #         **optimizer_kwargs,
+            #     )
+            # else:
+            self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+            if optimizer_cls.__name__ == "Adam8bit":
+                import bitsandbytes
 
-                    manager = bitsandbytes.optim.GlobalOptimManager.get_instance()
+                manager = bitsandbytes.optim.GlobalOptimManager.get_instance()
 
-                    skipped = 0
-                    for module in opt_model.modules():
-                        if isinstance(module, nn.Embedding):
-                            skipped += sum({p.data_ptr(): p.numel() for p in module.parameters()}.values())
-                            logger.info(f"skipped {module}: {skipped/2**20}M params")
-                            manager.register_module_override(module, "weight", {"optim_bits": 32})
-                            logger.debug(f"bitsandbytes: will optimize {module} in fp32")
-                    logger.info(f"skipped: {skipped/2**20}M params")
+                skipped = 0
+                for module in opt_model.modules():
+                    if isinstance(module,nn.Embedding):
+                        skipped += sum({p.data_ptr(): p.numel() for p in module.parameters()}.values())
+                        logger.info(f"skipped {module}: {skipped/2**20}M params")
+                        manager.register_module_override(module, "weight", {"optim_bits": 32})
+                        logger.debug(f"bitsandbytes: will optimize {module} in fp32")
+                logger.info(f"skipped: {skipped/2**20}M params")
 
         return self.optimizer
 
