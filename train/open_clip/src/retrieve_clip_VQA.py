@@ -1,3 +1,4 @@
+from gradio import Dataset
 import torch
 from PIL import Image
 import open_clip
@@ -10,7 +11,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 
-from training.data import HarvardDataset,HarvardVQADataset, IUXrayVQADataset_with_conf
+from training.data import HarvardDataset,HarvardVQADataset, IUXrayVQADataset
 import debugpy
 def retrieve_topk_per_image(logits, val_k_list,retrieve_threshold=''):
     
@@ -107,24 +108,22 @@ def main(args):
 
 #  IUXrayVQADataset_with_conf(Dataset):  # TODO
   #
-    train_dataset = IUXrayVQADataset_with_conf(
+    train_dataset = IUXrayVQADataset(
         args.img_root,
-        args.train_json,
-        preprocess,
-        tokenizer,
+        jsonl_file= args.train_json,
+        transforms= preprocess,
+        tokenizer=tokenizer,
+        
         # load_include_path=True,
-        config_type=args.config_type,
+        # config_type=args.config_type,
     )
-    eval_dataset = IUXrayVQADataset_with_conf(
+    eval_dataset = IUXrayVQADataset(
         args.img_root,
         args.eval_jsonl,
         preprocess,
         tokenizer,
         # test=(args.eval_type=='test'),
         fixed_K=args.fixed_k,
-        
-        
-        
     )
 
     train_dataloader = DataLoader(

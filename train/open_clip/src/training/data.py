@@ -393,7 +393,7 @@ class IUXrayVQADataset(Dataset):  # TODO
         self.fixed_K=fixed_K
 
         with open(jsonl_file, "r") as file:
-            self.data = [json.loads(line) for line in file]
+            self.data =json.load(file)
         # Flatten the list of image paths and associate each with the corresponding report
         self.image_ids = []
         # self.image_report_pairs = []
@@ -421,7 +421,9 @@ class IUXrayVQADataset(Dataset):  # TODO
 
     def __getitem__(self, idx):
         data_info = self.data[idx]
-        img_path = os.path.join(self.img_root, data_info["image"])
+        # img_path = os.path.join(self.img_root, data_info["image"])
+        img_path = os.path.join(self.img_root, data_info["image_path"][0]) if isinstance(data_info["image_path"],list) else os.path.join(self.img_root, data_info["image_path"])
+        
         image = Image.open(img_path).convert("RGB")
 
         if self.transform:
@@ -430,7 +432,8 @@ class IUXrayVQADataset(Dataset):  # TODO
         report = data_info["report"]
         report_text = self.tokenize([report])[0]
 
-        return image, report_text, img_path, retrival_k, data_info
+        # return image, report_text, img_path, retrival_k, data_info
+        return image, report_text, img_path
     
 class pmc_oa_VQADataset(Dataset):  # TODO
     def __init__(
@@ -776,22 +779,24 @@ class IUXrayVQADataset_with_conf(Dataset):  # TODO
             raise ValueError("config_type cannot be None.")
 
         with open(jsonl_file, "r") as file:
-            self.data = [json.loads(line) for line in file]
+            # self.data = [json.loads(line) for line in file]
+            self.data = json.load(file)
         
         if config_type == "tokenProb":
             confidence_list = [
-            entry["confidence"]
-            for entry in self.data
-            if entry["confidence"] is not None
-        ]
+                entry.get("confidence")
+                for entry in self.data
+                if entry.get("confidence") is not None
+            ]
         elif config_type=='verbConf':
             confidence_list = [
-            entry["confidence"]
-            for entry in self.data
-            if entry["confidence"] is not None
+                entry.get("confidence")
+                for entry in self.data
+                if entry.get("confidence") is not None
             ]
             confidence_list=[int(confidence.strip('%')) for confidence in confidence_list if confidence]
-        avg_confidence = sum(confidence_list) / len(confidence_list)
+            print(confidence_list)
+        avg_confidence = sum(confidence_list) / len(confidence_list) if confidence_list else 0
         print(confidence_list)
         print(f'average confidence: {avg_confidence}')
         self.min_confidence = min(confidence_list)
