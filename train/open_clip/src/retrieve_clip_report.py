@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from training.data import HarvardDataset
+from training.data import HarvardDataset, IUXrayDataset, IUXrayVQADataset
 import debugpy
 
 
@@ -104,25 +104,46 @@ def main(args):
     model = model.to(device)
     model.eval()
     tokenizer = open_clip.get_tokenizer(args.model_name_or_path)
-
-    train_dataset = HarvardDataset(
-        args.img_root,
-        args.train_json,
-        preprocess,
-        tokenizer,
-        load_include_path=True,
-    )
     
-    eval_dataset = HarvardDataset(
+    train_dataset = IUXrayDataset(
         args.img_root,
-        args.eval_jsonl,
-        preprocess,
-        tokenizer,
+        json_file= args.train_json,
+        transforms= preprocess,
+        tokenizer=tokenizer,
+        
+        load_include_path=True,
+        # config_type=args.config_type,
+    )
+    eval_dataset = IUXrayDataset(
+        args.img_root,
+        json_file= args.eval_jsonl,
+        transforms= preprocess,
+        tokenizer=tokenizer,
         load_include_path=True,
         load_include_k=True,
-        retrieval_k=args.fixed_k,
-        test=(args.eval_type=='test'),
+        retrieval_k=10,
+        # test=(args.eval_type=='test'),
+        # fixed_K=args.fixed_k,
     )
+
+    # train_dataset = HarvardDataset(
+    #     args.img_root,
+    #     args.train_json,
+    #     preprocess,
+    #     tokenizer,
+    #     load_include_path=True,
+    # )
+    
+    # eval_dataset = HarvardDataset(
+    #     args.img_root,
+    #     args.eval_jsonl,
+    #     preprocess,
+    #     tokenizer,
+    #     load_include_path=True,
+    #     load_include_k=True,
+    #     retrieval_k=args.fixed_k,
+    #     test=(args.eval_type=='test'),
+    # )
     # eval_dataset = quilt_1m_VQADataset(
     #     args.img_root,
     #     args.eval_jsonl,
@@ -163,7 +184,7 @@ def main(args):
 
     with torch.no_grad(), torch.cuda.amp.autocast():
         for batch in tqdm(train_dataloader, desc="Extracting traininig features"):
-            images, texts, image_full_paths = batch
+            images, texts, image_full_paths= batch
             images = images.to(device=device, dtype=input_dtype, non_blocking=True)
             texts = texts.to(device=device, non_blocking=True)
             train_all_image_full_paths.extend(image_full_paths)

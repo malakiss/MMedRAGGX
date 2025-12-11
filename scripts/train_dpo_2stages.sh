@@ -29,19 +29,20 @@ CUDA_VISIBLE_DEVICES=$CUDA_DEVICES deepspeed --include localhost:$CUDA train_dpo
     --gradient_accumulation_steps 1 \
     --eval_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 200 \
+    --save_steps 100 \
     --save_total_limit 1 \
     --learning_rate 1e-7 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
-    --logging_steps 1 \
+    --logging_steps 10 \
     --report_to wandb \
     --tf32 False \
     --model_max_length 1024 \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
+    --output_dir /home/m.ismail/MMed-RAG/checkpoints_dpo
 
 
 

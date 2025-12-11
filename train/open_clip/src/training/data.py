@@ -432,8 +432,8 @@ class IUXrayVQADataset(Dataset):  # TODO
         report = data_info["report"]
         report_text = self.tokenize([report])[0]
 
-        # return image, report_text, img_path, retrival_k, data_info
-        return image, report_text, img_path
+        return image, report_text, img_path, retrival_k, data_info
+        # return image, report_text, img_path
     
 class pmc_oa_VQADataset(Dataset):  # TODO
     def __init__(
