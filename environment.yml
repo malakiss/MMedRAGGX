@@ -1,0 +1,10 @@
+name: mmedrag
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip>=24.0
+  - pip:
+    - -r requirements_medgemma.txt
+    - -e ./train/open_clip

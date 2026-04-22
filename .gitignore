@@ -17,3 +17,5 @@ requirements.txt
 pmc_data
 caption_T060_filtered_top4_sep_v0_subfigures
 biomedical-graphrag/neo4j-community-2025.10.1
+biomedical-graphrag
+datasets
