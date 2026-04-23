@@ -93,12 +93,14 @@ class MedGemmaDPODataset(Dataset):
         image_folder: str,
         max_length: int = 1024,
         root_remap: Optional[Dict[str, str]] = None,
+        fallback_image_folders: Optional[List[str]] = None,
     ):
         self.data = json.load(open(data_path))
         self.processor = processor
         self.image_folder = image_folder
         self.max_length = max_length
         self.root_remap = root_remap or {}
+        self.fallback_image_folders = fallback_image_folders or []
 
     def __len__(self) -> int:
         return len(self.data)
@@ -110,13 +112,32 @@ class MedGemmaDPODataset(Dataset):
     def _resolve_image_path(self, item: dict) -> str:
         """
         Resolve the full image path.
-        Priority: root_remap match → image_folder fallback.
+        Priority: root_remap match → image_folder → fallback_image_folders (try each until found).
         """
         original_root = item.get("image_root", "")
+        image_name = item["image"]
+
+        candidates = []
+
+        # 1. Try remapped roots first
         for old_root, new_root in self.root_remap.items():
             if original_root.startswith(old_root):
-                return os.path.join(new_root, item["image"])
-        return os.path.join(self.image_folder, item["image"])
+                candidates.append(os.path.join(new_root, image_name))
+
+        # 2. Primary image folder
+        candidates.append(os.path.join(self.image_folder, image_name))
+
+        # 3. Fallback image folders
+        for fallback_root in self.fallback_image_folders:
+            candidates.append(os.path.join(fallback_root, image_name))
+
+        # Return first candidate that exists, else return first candidate
+        for path in candidates:
+            if os.path.isfile(path):
+                return path
+
+        # If none exist, return first candidate anyway (will error at load time with useful message)
+        return candidates[0] if candidates else os.path.join(self.image_folder, image_name)
 
     @staticmethod
     def _strip_image_token(text: str) -> str:

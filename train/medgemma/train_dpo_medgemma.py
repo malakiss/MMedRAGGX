@@ -80,6 +80,9 @@ class DataArguments:
     # Format: comma-separated "old_prefix:new_prefix" pairs, e.g.:
     #   "/home/wenhao/Datasets/med/rad/iu_xray/images:/mnt/d/iu_xray/images,..."
     image_root_remap: Optional[str] = field(default=None)
+    # Fallback image folders to search if image not found in primary root.
+    # Format: comma-separated paths, e.g.: "/path/to/iu_xray,/path/to/mimic_cxr"
+    fallback_image_folders: Optional[str] = field(default=None)
 
 
 @dataclass
@@ -357,12 +360,18 @@ def train():
                 old, new = pair.split(":", 1)
                 root_remap[old.strip()] = new.strip()
 
+    # Parse fallback image folders (comma-separated list)
+    fallback_roots: list = []
+    if data_args.fallback_image_folders:
+        fallback_roots = [p.strip() for p in data_args.fallback_image_folders.split(",") if p.strip()]
+
     dataset = MedGemmaDPODataset(
         data_path=data_args.data_path,
         processor=processor,
         image_folder=data_args.image_folder,
         max_length=data_args.max_length,
         root_remap=root_remap,
+        fallback_image_folders=fallback_roots,
     )
     logger.info(f"Training samples: {len(dataset)}")
 
