@@ -181,11 +181,14 @@ class MedGemmaDPODataset(Dataset):
         """
         Returns (input_ids, attention_mask, pixel_values, labels).
         Labels are -100 for the prompt tokens; actual ids only for response.
+
+        Note: The processor expects <image> tokens in the text to know where to place
+        image embeddings. These are special tokens recognized by the tokenizer.
         """
-        # Build conversation text manually
-        # Format: user message, then assistant response
-        full_text = f"User: {question}\n\nAssistant: {response}"
-        prompt_text = f"User: {question}\n\nAssistant:"
+        # Build conversation text with image token
+        # Format: <image> + question for user, then response for assistant
+        full_text = f"<image>\nUser: {question}\n\nAssistant: {response}"
+        prompt_text = f"<image>\nUser: {question}\n\nAssistant:"
 
         # Process full conversation
         full_enc = self.processor(
