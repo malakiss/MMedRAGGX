@@ -130,7 +130,7 @@ class MedGemmaDPODataset(Dataset):
 
         # 2. Primary image folder (full path)
         candidates.append(os.path.join(self.image_folder, image_name))
-
+        print("Falling back to MissingMIMIC data")
         # 3. Fallback folders search by basename only
         for fallback_root in self.fallback_image_folders:
             candidates.append(os.path.join(fallback_root, basename))
