@@ -181,26 +181,15 @@ class MedGemmaDPODataset(Dataset):
         """
         Returns (input_ids, attention_mask, pixel_values, labels).
         Labels are -100 for the prompt tokens; actual ids only for response.
-
-        Uses a simplified approach: build messages without relying on apply_chat_template
-        for image handling, since it can generate inconsistent image token counts.
         """
-        # Build messages for the processor (don't apply template yet)
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": question},
-                ],
-            },
-            {"role": "assistant", "content": response},
-        ]
+        # Build conversation text manually
+        # Format: user message, then assistant response
+        full_text = f"User: {question}\n\nAssistant: {response}"
+        prompt_text = f"User: {question}\n\nAssistant:"
 
-        # Process full conversation with the processor
-        # This handles image token generation correctly
+        # Process full conversation
         full_enc = self.processor(
-            messages,
+            text=full_text,
             images=[image],
             return_tensors="pt",
             padding="max_length",
@@ -208,19 +197,9 @@ class MedGemmaDPODataset(Dataset):
             truncation=True,
         )
 
-        # Process just the user message to get prompt length
-        # This tells us where labels should transition from -100 to real ids
-        prompt_messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": question},
-                ],
-            },
-        ]
+        # Process just the prompt to get prompt length
         prompt_enc = self.processor(
-            prompt_messages,
+            text=prompt_text,
             images=[image],
             return_tensors="pt",
         )
