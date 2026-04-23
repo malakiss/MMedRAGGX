@@ -15,9 +15,12 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageFile
 from torch.utils.data import Dataset
 from transformers import ProcessorMixin
+
+# Allow loading of truncated/incomplete JPEG images
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 IGNORE_INDEX = -100
 
@@ -130,7 +133,7 @@ class MedGemmaDPODataset(Dataset):
 
         # 2. Primary image folder (full path)
         candidates.append(os.path.join(self.image_folder, image_name))
-        print("Falling back to MissingMIMIC data")
+
         # 3. Fallback folders search by basename only
         for fallback_root in self.fallback_image_folders:
             candidates.append(os.path.join(fallback_root, basename))
@@ -178,6 +181,8 @@ class MedGemmaDPODataset(Dataset):
         """
         Returns (input_ids, attention_mask, pixel_values, labels).
         Labels are -100 for the prompt tokens; actual ids only for response.
+
+        IMPORTANT: Pass images as a list [image] to ensure consistent processor handling.
         """
         user_content = [
             {"type": "image"},
@@ -197,17 +202,19 @@ class MedGemmaDPODataset(Dataset):
         )
 
         # Tokenize prompt alone to measure its token span (includes image tokens)
+        # Pass images as a list to ensure consistent handling
         prompt_enc = self.processor(
             text=prompt_text,
-            images=image,
+            images=[image],
             return_tensors="pt",
         )
         prompt_len = prompt_enc["input_ids"].shape[1]
 
         # Tokenize full conversation with padding
+        # CRITICAL: Pass images as a list to match processor expectations
         full_enc = self.processor(
             text=full_text,
-            images=image,
+            images=[image],
             return_tensors="pt",
             padding="max_length",
             max_length=self.max_length,
@@ -216,6 +223,9 @@ class MedGemmaDPODataset(Dataset):
 
         input_ids = full_enc["input_ids"][0]
         attention_mask = full_enc["attention_mask"][0]
+
+        # pixel_values shape after processor: (batch=1, channels, height, width)
+        # Take [0] to remove batch dimension: (channels, height, width)
         pixel_values = full_enc["pixel_values"][0]
 
         labels = input_ids.clone()
