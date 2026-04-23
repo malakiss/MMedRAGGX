@@ -182,38 +182,25 @@ class MedGemmaDPODataset(Dataset):
         Returns (input_ids, attention_mask, pixel_values, labels).
         Labels are -100 for the prompt tokens; actual ids only for response.
 
-        IMPORTANT: Pass images as a list [image] to ensure consistent processor handling.
+        Uses a simplified approach: build messages without relying on apply_chat_template
+        for image handling, since it can generate inconsistent image token counts.
         """
-        user_content = [
-            {"type": "image"},
-            {"type": "text", "text": question},
-        ]
-        full_messages = [
-            {"role": "user", "content": user_content},
+        # Build messages for the processor (don't apply template yet)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": question},
+                ],
+            },
             {"role": "assistant", "content": response},
         ]
-        prompt_messages = [{"role": "user", "content": user_content}]
 
-        full_text = self.processor.apply_chat_template(
-            full_messages, tokenize=False, add_generation_prompt=False
-        )
-        prompt_text = self.processor.apply_chat_template(
-            prompt_messages, tokenize=False, add_generation_prompt=True
-        )
-
-        # Tokenize prompt alone to measure its token span (includes image tokens)
-        # Pass images as a list to ensure consistent handling
-        prompt_enc = self.processor(
-            text=prompt_text,
-            images=[image],
-            return_tensors="pt",
-        )
-        prompt_len = prompt_enc["input_ids"].shape[1]
-
-        # Tokenize full conversation with padding
-        # CRITICAL: Pass images as a list to match processor expectations
+        # Process full conversation with the processor
+        # This handles image token generation correctly
         full_enc = self.processor(
-            text=full_text,
+            messages,
             images=[image],
             return_tensors="pt",
             padding="max_length",
@@ -221,11 +208,26 @@ class MedGemmaDPODataset(Dataset):
             truncation=True,
         )
 
+        # Process just the user message to get prompt length
+        # This tells us where labels should transition from -100 to real ids
+        prompt_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": question},
+                ],
+            },
+        ]
+        prompt_enc = self.processor(
+            prompt_messages,
+            images=[image],
+            return_tensors="pt",
+        )
+        prompt_len = prompt_enc["input_ids"].shape[1]
+
         input_ids = full_enc["input_ids"][0]
         attention_mask = full_enc["attention_mask"][0]
-
-        # pixel_values shape after processor: (batch=1, channels, height, width)
-        # Take [0] to remove batch dimension: (channels, height, width)
         pixel_values = full_enc["pixel_values"][0]
 
         labels = input_ids.clone()
