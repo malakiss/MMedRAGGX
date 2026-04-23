@@ -112,24 +112,28 @@ class MedGemmaDPODataset(Dataset):
     def _resolve_image_path(self, item: dict) -> str:
         """
         Resolve the full image path.
-        Priority: root_remap match → image_folder → fallback_image_folders (try each until found).
+        Priority:
+          1. root_remap match (full path remapping)
+          2. image_folder + full image path
+          3. fallback_image_folders + basename only (last component after /)
         """
         original_root = item.get("image_root", "")
         image_name = item["image"]
+        basename = os.path.basename(image_name)  # just the filename
 
         candidates = []
 
-        # 1. Try remapped roots first
+        # 1. Try remapped roots first (full path)
         for old_root, new_root in self.root_remap.items():
             if original_root.startswith(old_root):
                 candidates.append(os.path.join(new_root, image_name))
 
-        # 2. Primary image folder
+        # 2. Primary image folder (full path)
         candidates.append(os.path.join(self.image_folder, image_name))
 
-        # 3. Fallback image folders
+        # 3. Fallback folders search by basename only
         for fallback_root in self.fallback_image_folders:
-            candidates.append(os.path.join(fallback_root, image_name))
+            candidates.append(os.path.join(fallback_root, basename))
 
         # Return first candidate that exists, else return first candidate
         for path in candidates:
