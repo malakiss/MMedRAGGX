@@ -243,8 +243,35 @@ class MedGemmaDPOTrainer(Trainer):
 # Model + LoRA setup
 # ---------------------------------------------------------------------------
 
+def _patch_init_weights_for_qlora():
+    """
+    Patch PaliGemma's _init_weights to skip uint8 (4-bit NF4) tensors.
+
+    Some transformers versions call _initialize_missing_keys → _init_weights on ALL
+    submodules including already-quantized ones, then fail with:
+      NotImplementedError: "normal_kernel_cpu" not implemented for 'Byte'
+    Skipping Byte-dtype weights is safe — they are already initialised by bnb.
+    """
+    from transformers.models.paligemma import modeling_paligemma as _pg
+
+    _orig = _pg.PaliGemmaForConditionalGeneration._init_weights
+
+    def _safe_init(self, module):
+        weight = getattr(module, "weight", None)
+        if weight is not None and weight.dtype == torch.uint8:
+            return  # already quantised — skip
+        try:
+            _orig(self, module)
+        except (NotImplementedError, RuntimeError):
+            pass  # other quantised sub-modules (e.g. bnb Linear4bit)
+
+    _pg.PaliGemmaForConditionalGeneration._init_weights = _safe_init
+
+
 def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArguments):
     from transformers import PaliGemmaForConditionalGeneration
+
+    _patch_init_weights_for_qlora()
 
     bnb_config = None
     if model_args.use_4bit:
@@ -268,6 +295,7 @@ def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArgument
         quantization_config=bnb_config,
         torch_dtype=torch.bfloat16,
         device_map=device_map,
+        low_cpu_mem_usage=True,
         token=os.environ.get("HF_TOKEN"),
     )
     model.config.use_cache = False
@@ -307,7 +335,12 @@ def train():
     parser = HfArgumentParser((ModelArguments, DataArguments, DPOTrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    wandb.login(key=os.environ.get("WANDB_API_KEY", ""))
+    wandb_key = os.environ.get("WANDB_API_KEY", "")
+    if wandb_key:
+        wandb.login(key=wandb_key)
+    else:
+        os.environ["WANDB_DISABLED"] = "true"
+        logger.warning("WANDB_API_KEY not set — W&B logging disabled.")
 
     processor = AutoProcessor.from_pretrained(
         model_args.model_name_or_path,
