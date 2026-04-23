@@ -181,18 +181,40 @@ class MedGemmaDPODataset(Dataset):
         """
         Returns (input_ids, attention_mask, pixel_values, labels).
         Labels are -100 for the prompt tokens; actual ids only for response.
-
-        Note: The processor expects <image> tokens in the text to know where to place
-        image embeddings. These are special tokens recognized by the tokenizer.
         """
-        # Build conversation text with image token
-        # Format: <image> + question for user, then response for assistant
-        full_text = f"<image>\nUser: {question}\n\nAssistant: {response}"
-        prompt_text = f"<image>\nUser: {question}\n\nAssistant:"
+        # Build messages in standard format
+        messages_full = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": question},
+                ],
+            },
+            {"role": "assistant", "content": response},
+        ]
+
+        messages_prompt = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": question},
+                ],
+            },
+        ]
+
+        # Use apply_chat_template to generate properly formatted text
+        text_full = self.processor.apply_chat_template(
+            messages_full, add_generation_prompt=False
+        )
+        text_prompt = self.processor.apply_chat_template(
+            messages_prompt, add_generation_prompt=True
+        )
 
         # Process full conversation
         full_enc = self.processor(
-            text=full_text,
+            text=text_full,
             images=[image],
             return_tensors="pt",
             padding="max_length",
@@ -202,7 +224,7 @@ class MedGemmaDPODataset(Dataset):
 
         # Process just the prompt to get prompt length
         prompt_enc = self.processor(
-            text=prompt_text,
+            text=text_prompt,
             images=[image],
             return_tensors="pt",
         )
