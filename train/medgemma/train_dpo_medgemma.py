@@ -406,7 +406,7 @@ def train():
     )
 
     model = load_medgemma(model_args, training_args)
-
+    print(processor.tokenizer.additional_special_tokens)
     # Resolve the image-placeholder token ID used by Gemma3 in input_ids.
     # We need this to substitute pre-computed SigLIP features into inputs_embeds
     # instead of re-running the vision encoder on every DPO forward pass.
