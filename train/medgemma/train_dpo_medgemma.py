@@ -101,22 +101,24 @@ class DPOTrainingArguments(TrainingArguments):
 
 class MedGemmaDPOTrainer(Trainer):
     """
-    Trainer that implements the DPO sigmoid loss for MedGemma.
+    DPO sigmoid-loss trainer for MedGemma (Gemma3ForConditionalGeneration + SigLIP).
 
-    Does TWO separate forward passes per step (chosen + rejected) because
-    chosen uses the real image while rejected uses a Gaussian-noise image —
-    they cannot be batched into a single concatenated forward.
+    Memory-efficient design: SigLIP (896×896 → 4096 patches) runs exactly TWICE
+    per step (once for chosen, once for rejected), always inside torch.no_grad()
+    and with the result detached.  The 4 log-prob computations (policy × 2,
+    reference × 2) then run as LM-only passes with pre-built inputs_embeds,
+    avoiding the 1024 MB SigLIP attention allocation that causes OOM on T4s.
 
-    The reference model is the same PeftModel with adapters disabled,
-    so we never need to load a second copy of the 4B weights.
+    Reference model = same PeftModel with LoRA adapters disabled — no 2nd copy.
     """
 
-    def __init__(self, beta: float = 0.1, **kwargs):
+    def __init__(self, beta: float = 0.1, image_token_id: int = None, **kwargs):
         super().__init__(**kwargs)
         self.beta = beta
+        self.image_token_id = image_token_id
 
     # ------------------------------------------------------------------
-    # Log-probability computation (identical to original pipeline)
+    # Log-probability computation
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -134,7 +136,7 @@ class MedGemmaDPOTrainer(Trainer):
         return (per_token_logps * loss_mask).sum(-1)
 
     # ------------------------------------------------------------------
-    # DPO loss (same sigmoid formula as original)
+    # DPO loss
     # ------------------------------------------------------------------
 
     def _dpo_loss(
@@ -153,23 +155,48 @@ class MedGemmaDPOTrainer(Trainer):
         return losses, chosen_rewards, rejected_rewards
 
     # ------------------------------------------------------------------
-    # Forward helpers
+    # Vision feature pre-computation + inputs_embeds construction
+    # ------------------------------------------------------------------
+
+    def _build_inputs_embeds(
+        self,
+        base_model: nn.Module,
+        input_ids: torch.Tensor,
+        image_features: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Replace image-placeholder tokens in the token-embedding sequence with
+        pre-computed SigLIP features.  Mirrors what Gemma3ForConditionalGeneration
+        does internally (masked_scatter on image_token_id positions), but lets us
+        skip the vision encoder on every call.
+
+        image_features: [B, n_img, lm_hidden]  (n_img == 256 for MedGemma)
+        """
+        inputs_embeds = base_model.get_input_embeddings()(input_ids)
+        mask = (
+            (input_ids == self.image_token_id)
+            .unsqueeze(-1)
+            .expand_as(inputs_embeds)
+        )
+        # masked_scatter expects a 1-D source with exactly as many elements as
+        # True entries in the mask: B * n_img * lm_hidden
+        flat_features = image_features.to(inputs_embeds.dtype).reshape(-1)
+        return inputs_embeds.masked_scatter(mask, flat_features)
+
+    # ------------------------------------------------------------------
+    # LM-only forward (vision features already baked into inputs_embeds)
     # ------------------------------------------------------------------
 
     def _forward(
         self,
         model: nn.Module,
-        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
-        pixel_values: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.FloatTensor:
-        # pixel_values must be in bfloat16 for SigLIP — model.dtype returns uint8
-        # for QLoRA storage and must not be used here.
         out = model(
-            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            pixel_values=pixel_values.to(torch.bfloat16),
         )
         return self._get_batch_logps(out.logits.float(), labels)
 
@@ -185,47 +212,55 @@ class MedGemmaDPOTrainer(Trainer):
         num_items_in_batch: Optional[int] = None,
     ) -> Union[torch.Tensor, Tuple]:
 
-        # ── Policy: chosen ──────────────────────────────────────────────
-        policy_chosen_logps = self._forward(
-            model,
-            inputs["chosen_input_ids"],
-            inputs["chosen_attention_mask"],
-            inputs["chosen_pixel_values"],
-            inputs["chosen_labels"],
-        )
+        unwrapped = self.accelerator.unwrap_model(model)
+        # Navigate PeftModel → LoraModel → Gemma3ForConditionalGeneration
+        base_model = unwrapped.base_model.model
 
-        # ── Policy: rejected ────────────────────────────────────────────
-        policy_rejected_logps = self._forward(
-            model,
-            inputs["rejected_input_ids"],
-            inputs["rejected_attention_mask"],
-            inputs["rejected_pixel_values"],
-            inputs["rejected_labels"],
-        )
-
-        # ── Reference model (base weights, LoRA disabled) ──────────────
+        # ── SigLIP: run ONCE per image, always without gradient ─────────
+        # SigLIP is entirely frozen (not in LoRA targets), so its output is
+        # identical with adapters on or off.  Computing it once (no_grad +
+        # detach) instead of 4× eliminates the ~1 GB attention peak per pass.
         with torch.no_grad():
-            with self.accelerator.unwrap_model(model).disable_adapter():
+            chosen_features = base_model.get_image_features(
+                inputs["chosen_pixel_values"].to(torch.bfloat16)
+            ).detach()
+            rejected_features = base_model.get_image_features(
+                inputs["rejected_pixel_values"].to(torch.bfloat16)
+            ).detach()
+
+        # ── Build inputs_embeds (image features substituted) ────────────
+        chosen_embeds = self._build_inputs_embeds(
+            base_model, inputs["chosen_input_ids"], chosen_features
+        )
+        rejected_embeds = self._build_inputs_embeds(
+            base_model, inputs["rejected_input_ids"], rejected_features
+        )
+
+        # ── Policy: chosen + rejected (LoRA active, grads through LM) ───
+        policy_chosen_logps = self._forward(
+            model, chosen_embeds,
+            inputs["chosen_attention_mask"], inputs["chosen_labels"],
+        )
+        policy_rejected_logps = self._forward(
+            model, rejected_embeds,
+            inputs["rejected_attention_mask"], inputs["rejected_labels"],
+        )
+
+        # ── Reference: chosen + rejected (LoRA disabled, no grad) ───────
+        with torch.no_grad():
+            with unwrapped.disable_adapter():
                 ref_chosen_logps = self._forward(
-                    model,
-                    inputs["chosen_input_ids"],
-                    inputs["chosen_attention_mask"],
-                    inputs["chosen_pixel_values"],
-                    inputs["chosen_labels"],
+                    model, chosen_embeds.detach(),
+                    inputs["chosen_attention_mask"], inputs["chosen_labels"],
                 )
                 ref_rejected_logps = self._forward(
-                    model,
-                    inputs["rejected_input_ids"],
-                    inputs["rejected_attention_mask"],
-                    inputs["rejected_pixel_values"],
-                    inputs["rejected_labels"],
+                    model, rejected_embeds.detach(),
+                    inputs["rejected_attention_mask"], inputs["rejected_labels"],
                 )
 
         losses, chosen_rewards, rejected_rewards = self._dpo_loss(
-            policy_chosen_logps,
-            policy_rejected_logps,
-            ref_chosen_logps,
-            ref_rejected_logps,
+            policy_chosen_logps, policy_rejected_logps,
+            ref_chosen_logps, ref_rejected_logps,
         )
         loss = losses.mean()
 
@@ -372,6 +407,23 @@ def train():
 
     model = load_medgemma(model_args, training_args)
 
+    # Resolve the image-placeholder token ID used by Gemma3 in input_ids.
+    # We need this to substitute pre-computed SigLIP features into inputs_embeds
+    # instead of re-running the vision encoder on every DPO forward pass.
+    _base_for_cfg = getattr(getattr(model, "base_model", model), "model", model)
+    image_token_id = getattr(_base_for_cfg.config, "image_token_id", None)
+    if image_token_id is None:
+        tok_id = processor.tokenizer.convert_tokens_to_ids("<image_soft>")
+        unk_id = processor.tokenizer.unk_token_id
+        if tok_id != unk_id:
+            image_token_id = tok_id
+    if image_token_id is None:
+        raise RuntimeError(
+            "Cannot find image_token_id in model config or tokenizer vocab. "
+            "Check that the processor has a '<image_soft>' token."
+        )
+    logger.info(f"Image token ID for inputs_embeds substitution: {image_token_id}")
+
     # Parse path remapping (old_prefix:new_prefix,old2:new2,...)
     root_remap: dict = {}
     if data_args.image_root_remap:
@@ -401,6 +453,7 @@ def train():
 
     trainer = MedGemmaDPOTrainer(
         beta=training_args.beta,
+        image_token_id=image_token_id,
         model=model,
         args=training_args,
         train_dataset=dataset,
