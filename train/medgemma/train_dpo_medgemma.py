@@ -89,10 +89,11 @@ class DataArguments:
 class DPOTrainingArguments(TrainingArguments):
     beta: float = field(default=0.1)
     lora_enable: bool = field(default=True)
-    lora_r: int = field(default=128)
-    lora_alpha: int = field(default=256)
+    lora_r: int = field(default=64)       # 128 → 64: halves LoRA + optimizer memory
+    lora_alpha: int = field(default=128)  # keep ratio lora_alpha/lora_r = 2
     lora_dropout: float = field(default=0.05)
     remove_unused_columns: bool = field(default=False)
+    optim: str = field(default="adamw_bnb_8bit")  # 8-bit optimizer: saves ~1 GB vs fp32 AdamW
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +199,12 @@ class MedGemmaDPOTrainer(Trainer):
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
         )
-        return self._get_batch_logps(out.logits.float(), labels)
+        # accelerate's convert_to_fp32 upcasts logits to fp32:
+        # [1, 1024, 256128] × fp32 = 1 GB per pass.  Downcast to bf16 immediately
+        # (512 MB) — sufficient precision for DPO log-ratio differences.
+        logits = out.logits.to(torch.bfloat16)
+        del out
+        return self._get_batch_logps(logits, labels)
 
     # ------------------------------------------------------------------
     # Main training step
@@ -227,6 +233,9 @@ class MedGemmaDPOTrainer(Trainer):
             rejected_features = base_model.get_image_features(
                 inputs["rejected_pixel_values"].to(torch.bfloat16)
             ).detach()
+        # Flush CUDA allocator after the large SigLIP attention peaks so
+        # reserved-but-unallocated memory is returned before the LM passes.
+        torch.cuda.empty_cache()
 
         # ── Build inputs_embeds (image features substituted) ────────────
         chosen_embeds = self._build_inputs_embeds(
