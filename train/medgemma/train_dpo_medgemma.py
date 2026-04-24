@@ -250,42 +250,28 @@ def _patch_init_weights_for_qlora():
     """
     Patch weight initialisation to handle bitsandbytes 4-bit (QLoRA).
 
-    Some transformers versions call self.apply(self._initialize_weights) even when
-    the model is quantized, which tries to run normal_() on uint8 'Byte' tensors:
+    transformers calls self.apply(self._initialize_weights) inside
+    _initialize_missing_keys, which tries normal_() on uint8 'Byte' weights:
       NotImplementedError: "normal_kernel_cpu" not implemented for 'Byte'
 
-    Two-layer fix:
-      1. _initialize_missing_keys: skip the call entirely when quantized layers exist.
-      2. _init_weights: skip any module whose weight is already a Byte/uint8 tensor.
+    The bnb quantization happens *during* from_pretrained so the Linear4bit
+    layers do not exist yet when _initialize_missing_keys is first entered —
+    we cannot detect them there.  Instead we patch _initialize_weights (the
+    per-module wrapper) to silently skip any module with a Byte weight.
+    This is safe because bitsandbytes has already initialised those weights.
     """
     import torch
     from transformers.modeling_utils import PreTrainedModel
 
-    _bnb_types = ("Linear4bit", "Params4bit", "Int8Params", "Linear8bitLt")
+    _orig = PreTrainedModel._initialize_weights
 
-    # Layer 1 – skip _initialize_missing_keys wholesale when bnb layers present
-    _orig_init_missing = PreTrainedModel._initialize_missing_keys
-
-    def _safe_initialize_missing_keys(self, checkpoint_keys, ignore_mismatched_sizes, is_quantized):
-        if not is_quantized:
-            for module in self.modules():
-                if type(module).__name__ in _bnb_types:
-                    logger.debug("QLoRA detected – skipping _initialize_missing_keys")
-                    return  # quantized weights are already set by bitsandbytes
-        return _orig_init_missing(self, checkpoint_keys, ignore_mismatched_sizes, is_quantized)
-
-    PreTrainedModel._initialize_missing_keys = _safe_initialize_missing_keys
-
-    # Layer 2 – guard individual _init_weights calls against Byte tensors
-    _orig_init_weights = PreTrainedModel._init_weights
-
-    def _safe_init_weights(self, module):
+    def _safe_initialize_weights(self, module):
         weight = getattr(module, "weight", None)
         if weight is not None and weight.dtype == torch.uint8:
-            return  # already quantized; do not touch
-        return _orig_init_weights(self, module)
+            return  # bitsandbytes quantized weight — already initialised
+        return _orig(self, module)
 
-    PreTrainedModel._init_weights = _safe_init_weights
+    PreTrainedModel._initialize_weights = _safe_initialize_weights
 
 
 def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArguments):
