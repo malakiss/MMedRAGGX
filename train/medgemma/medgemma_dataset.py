@@ -7,6 +7,7 @@ Each sample returns tokenized chosen + rejected pairs where:
 """
 
 import copy
+import functools
 import json
 import os
 import re
@@ -175,6 +176,25 @@ class MedGemmaDPODataset(Dataset):
             raw = self._strip_image_token(item["conversations"][0]["value"])
             return raw
 
+    @functools.cached_property
+    def _image_seq_len(self) -> int:
+        """
+        Image tokens produced by the vision encoder per image.
+        Computed from the image processor's size + patch_size so that
+        apply_chat_template receives the correct `image_seq_len` kwarg
+        (the Jinja template reads this kwarg, not processor.image_seq_length).
+        """
+        ip = self.processor.image_processor
+        raw = getattr(ip, "size", None)
+        if isinstance(raw, dict):
+            h = raw.get("height", raw.get("shortest_edge", 224))
+        elif isinstance(raw, int):
+            h = raw
+        else:
+            h = 224
+        patch = getattr(ip, "patch_size", 14)
+        return (h // patch) ** 2
+
     def _tokenize_pair(
         self, image: Image.Image, question: str, response: str
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -182,7 +202,8 @@ class MedGemmaDPODataset(Dataset):
         Returns (input_ids, attention_mask, pixel_values, labels).
         Labels are -100 for the prompt tokens; actual ids only for response.
         """
-        # Build messages in standard format
+        image_seq_len = self._image_seq_len  # e.g. 4096 for 896×896 / patch=14
+
         messages_full = [
             {
                 "role": "user",
@@ -204,15 +225,15 @@ class MedGemmaDPODataset(Dataset):
             },
         ]
 
-        # Use apply_chat_template to generate properly formatted text
+        # Pass image_seq_len explicitly — the Jinja chat template reads this kwarg
+        # to decide how many image-token placeholders to emit per image.
         text_full = self.processor.apply_chat_template(
-            messages_full, add_generation_prompt=False
+            messages_full, add_generation_prompt=False, image_seq_len=image_seq_len
         )
         text_prompt = self.processor.apply_chat_template(
-            messages_prompt, add_generation_prompt=True
+            messages_prompt, add_generation_prompt=True, image_seq_len=image_seq_len
         )
 
-        # Process full conversation
         full_enc = self.processor(
             text=text_full,
             images=[image],
@@ -222,7 +243,6 @@ class MedGemmaDPODataset(Dataset):
             truncation=True,
         )
 
-        # Process just the prompt to get prompt length
         prompt_enc = self.processor(
             text=text_prompt,
             images=[image],
@@ -236,7 +256,6 @@ class MedGemmaDPODataset(Dataset):
 
         labels = input_ids.clone()
         labels[:prompt_len] = IGNORE_INDEX
-        # also mask padding
         labels[input_ids == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
 
         return input_ids, attention_mask, pixel_values, labels
