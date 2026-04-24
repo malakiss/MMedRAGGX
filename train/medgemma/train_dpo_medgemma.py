@@ -75,7 +75,7 @@ class ModelArguments:
 class DataArguments:
     data_path: str = field(default=None)
     image_folder: str = field(default=None)
-    max_length: int = field(default=1024)  # 256 image tokens + ~768 text tokens
+    max_length: int = field(default=512)   # 256 image tokens + ~256 text tokens
     # Remap original image_root values baked into the JSON to local paths.
     # Format: comma-separated "old_prefix:new_prefix" pairs, e.g.:
     #   "/home/wenhao/Datasets/med/rad/iu_xray/images:/mnt/d/iu_xray/images,..."
@@ -312,18 +312,19 @@ def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArgument
     model.config.use_cache = False
 
     if training_args.lora_enable:
+        # Always enable gradient checkpointing for QLoRA on constrained hardware.
+        # Four DPO forward passes per step make this essential on T4/A100.
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=True
+        )
+        training_args.gradient_checkpointing = True  # keep Trainer in sync
+
         if model_args.lora_checkpoint_path:
             logger.info(f"Resuming LoRA from {model_args.lora_checkpoint_path}")
-            model = prepare_model_for_kbit_training(
-                model, use_gradient_checkpointing=training_args.gradient_checkpointing
-            )
             model = PeftModel.from_pretrained(
                 model, model_args.lora_checkpoint_path, is_trainable=True
             )
         else:
-            model = prepare_model_for_kbit_training(
-                model, use_gradient_checkpointing=training_args.gradient_checkpointing
-            )
             lora_cfg = LoraConfig(
                 r=training_args.lora_r,
                 lora_alpha=training_args.lora_alpha,
@@ -334,6 +335,17 @@ def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArgument
             )
             model = get_peft_model(model, lora_cfg)
             model.print_trainable_parameters()
+
+        # prepare_model_for_kbit_training enables gradient checkpointing on the LM
+        # but not always on the vision tower.  Enable it explicitly on SigLIP so
+        # the large 896×896 → 4096-patch ViT doesn't OOM during the DPO forward.
+        try:
+            base = model.base_model.model
+            if hasattr(base, "vision_tower"):
+                base.vision_tower.gradient_checkpointing_enable()
+                logger.info("Vision tower gradient checkpointing enabled.")
+        except Exception as e:
+            logger.warning(f"Could not enable vision tower gradient checkpointing: {e}")
 
     return model
 
