@@ -248,30 +248,30 @@ class MedGemmaDPOTrainer(Trainer):
 
 def _patch_siglip_interpolate():
     """
-    Patch PaliGemmaForConditionalGeneration.get_image_features to pass
-    interpolate_pos_encoding=True to the SigLIP vision tower.
+    Patch SiglipVisionEmbeddings.forward to always use interpolate_pos_encoding=True.
 
-    MedGemma's SigLIP was trained with 4096 position embeddings (896×896 images).
-    The Gemma3 chat template hardcodes 256 image-token placeholders (224×224).
-    We process images at 224×224 (256 patches) and let SigLIP bilinearly
-    interpolate its position table from 4096 → 256, which is the standard
-    ViT approach for running at a different resolution from training.
-    Both sides then agree on 256 tokens and the model forward succeeds.
+    MedGemma's SigLIP has 4096 position embeddings (trained at 896×896).
+    We feed 224×224 images (256 patches) to match the chat template's 256
+    image-token placeholders.  Without interpolation, adding the 4096-entry
+    position table to 256 patch embeddings raises a shape mismatch.
+    Bilinear interpolation of the position table (4096→256) is the standard
+    ViT approach and is already supported by the SigLIP implementation.
+
+    Patching at the SiglipVisionEmbeddings level means this fix applies to
+    any model class (PaliGemma, Gemma3, etc.) that uses SigLIP as its
+    vision encoder, without needing to know the high-level model type.
     """
-    from transformers.models.paligemma.modeling_paligemma import (
-        PaliGemmaForConditionalGeneration,
-    )
+    try:
+        from transformers.models.siglip.modeling_siglip import SiglipVisionEmbeddings
+        _orig = SiglipVisionEmbeddings.forward
 
-    _orig = PaliGemmaForConditionalGeneration.get_image_features
+        def _patched(self, pixel_values, interpolate_pos_encoding=False):
+            return _orig(self, pixel_values, interpolate_pos_encoding=True)
 
-    def _patched(self, pixel_values):
-        image_outputs = self.vision_tower(
-            pixel_values, interpolate_pos_encoding=True
-        )
-        selected = image_outputs.last_hidden_state
-        return self.multi_modal_projector(selected)
-
-    PaliGemmaForConditionalGeneration.get_image_features = _patched
+        SiglipVisionEmbeddings.forward = _patched
+        logger.info("Patched SiglipVisionEmbeddings.forward → interpolate_pos_encoding=True")
+    except (ImportError, AttributeError) as e:
+        logger.warning(f"Could not patch SiglipVisionEmbeddings: {e}")
 
 
 def _patch_init_weights_for_qlora():
@@ -303,7 +303,12 @@ def _patch_init_weights_for_qlora():
 
 
 def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArguments):
-    from transformers import PaliGemmaForConditionalGeneration
+    # Use AutoModelForImageTextToText so the correct class (Gemma3ForConditionalGeneration
+    # or similar) is selected from the checkpoint's model_type field.
+    # Loading MedGemma (type "gemma3") with PaliGemmaForConditionalGeneration fails because
+    # the multi_modal_projector is newly-initialised with wrong hidden-size dimensions,
+    # causing the image-token count check to fail at inference time.
+    from transformers import AutoModelForImageTextToText
 
     _patch_siglip_interpolate()
     _patch_init_weights_for_qlora()
@@ -325,7 +330,7 @@ def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArgument
     else:
         device_map = {"": local_rank}  # DDP: this process owns exactly one GPU
 
-    model = PaliGemmaForConditionalGeneration.from_pretrained(
+    model = AutoModelForImageTextToText.from_pretrained(
         model_args.model_name_or_path,
         quantization_config=bnb_config,
         torch_dtype=torch.bfloat16,
