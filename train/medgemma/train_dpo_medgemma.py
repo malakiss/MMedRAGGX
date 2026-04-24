@@ -246,6 +246,34 @@ class MedGemmaDPOTrainer(Trainer):
 # Model + LoRA setup
 # ---------------------------------------------------------------------------
 
+def _patch_siglip_interpolate():
+    """
+    Patch PaliGemmaForConditionalGeneration.get_image_features to pass
+    interpolate_pos_encoding=True to the SigLIP vision tower.
+
+    MedGemma's SigLIP was trained with 4096 position embeddings (896×896 images).
+    The Gemma3 chat template hardcodes 256 image-token placeholders (224×224).
+    We process images at 224×224 (256 patches) and let SigLIP bilinearly
+    interpolate its position table from 4096 → 256, which is the standard
+    ViT approach for running at a different resolution from training.
+    Both sides then agree on 256 tokens and the model forward succeeds.
+    """
+    from transformers.models.paligemma.modeling_paligemma import (
+        PaliGemmaForConditionalGeneration,
+    )
+
+    _orig = PaliGemmaForConditionalGeneration.get_image_features
+
+    def _patched(self, pixel_values):
+        image_outputs = self.vision_tower(
+            pixel_values, interpolate_pos_encoding=True
+        )
+        selected = image_outputs.last_hidden_state
+        return self.multi_modal_projector(selected)
+
+    PaliGemmaForConditionalGeneration.get_image_features = _patched
+
+
 def _patch_init_weights_for_qlora():
     """
     Patch weight initialisation to handle bitsandbytes 4-bit (QLoRA).
@@ -277,6 +305,7 @@ def _patch_init_weights_for_qlora():
 def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArguments):
     from transformers import PaliGemmaForConditionalGeneration
 
+    _patch_siglip_interpolate()
     _patch_init_weights_for_qlora()
 
     bnb_config = None
