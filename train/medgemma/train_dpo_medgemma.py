@@ -246,34 +246,6 @@ class MedGemmaDPOTrainer(Trainer):
 # Model + LoRA setup
 # ---------------------------------------------------------------------------
 
-def _patch_siglip_interpolate():
-    """
-    Patch SiglipVisionEmbeddings.forward to always use interpolate_pos_encoding=True.
-
-    MedGemma's SigLIP has 4096 position embeddings (trained at 896×896).
-    We feed 224×224 images (256 patches) to match the chat template's 256
-    image-token placeholders.  Without interpolation, adding the 4096-entry
-    position table to 256 patch embeddings raises a shape mismatch.
-    Bilinear interpolation of the position table (4096→256) is the standard
-    ViT approach and is already supported by the SigLIP implementation.
-
-    Patching at the SiglipVisionEmbeddings level means this fix applies to
-    any model class (PaliGemma, Gemma3, etc.) that uses SigLIP as its
-    vision encoder, without needing to know the high-level model type.
-    """
-    try:
-        from transformers.models.siglip.modeling_siglip import SiglipVisionEmbeddings
-        _orig = SiglipVisionEmbeddings.forward
-
-        def _patched(self, pixel_values, interpolate_pos_encoding=False):
-            return _orig(self, pixel_values, interpolate_pos_encoding=True)
-
-        SiglipVisionEmbeddings.forward = _patched
-        logger.info("Patched SiglipVisionEmbeddings.forward → interpolate_pos_encoding=True")
-    except (ImportError, AttributeError) as e:
-        logger.warning(f"Could not patch SiglipVisionEmbeddings: {e}")
-
-
 def _patch_init_weights_for_qlora():
     """
     Patch weight initialisation to handle bitsandbytes 4-bit (QLoRA).
@@ -310,7 +282,6 @@ def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArgument
     # causing the image-token count check to fail at inference time.
     from transformers import AutoModelForImageTextToText
 
-    _patch_siglip_interpolate()
     _patch_init_weights_for_qlora()
 
     bnb_config = None
@@ -386,20 +357,6 @@ def train():
         model_args.model_name_or_path,
         token=os.environ.get("HF_TOKEN"),
     )
-
-    # The Gemma3 chat template hardcodes 256 image-token placeholders per image
-    # (corresponding to 224×224 / patch_size=14).  The image_processor, however,
-    # is configured for 896×896 and would produce 4096 embeddings — a mismatch
-    # that crashes the model forward.  Force the image_processor to 224×224 so
-    # both sides agree on 256 tokens.  image_seq_length on the processor object
-    # and image_seq_len as a template kwarg are both ignored by this template.
-    if hasattr(processor, "image_processor"):
-        ip = processor.image_processor
-        target = 224
-        ip.size = {"height": target, "width": target}
-        if hasattr(ip, "crop_size"):
-            ip.crop_size = {"height": target, "width": target}
-        logger.info(f"Forced image_processor size to {target}×{target} (→ 256 tokens, matching template)")
 
     model = load_medgemma(model_args, training_args)
 
