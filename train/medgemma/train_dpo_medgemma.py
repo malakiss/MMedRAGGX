@@ -75,7 +75,7 @@ class ModelArguments:
 class DataArguments:
     data_path: str = field(default=None)
     image_folder: str = field(default=None)
-    max_length: int = field(default=1024)
+    max_length: int = field(default=4352)  # 4096 image tokens + ~256 text tokens
     # Remap original image_root values baked into the JSON to local paths.
     # Format: comma-separated "old_prefix:new_prefix" pairs, e.g.:
     #   "/home/wenhao/Datasets/med/rad/iu_xray/images:/mnt/d/iu_xray/images,..."
@@ -248,27 +248,33 @@ class MedGemmaDPOTrainer(Trainer):
 
 def _patch_init_weights_for_qlora():
     """
-    Patch PaliGemma's _init_weights to skip uint8 (4-bit NF4) tensors.
+    Patch `_initialize_missing_keys` at the PreTrainedModel level to handle bitsandbytes 4-bit.
 
-    Some transformers versions call _initialize_missing_keys → _init_weights on ALL
-    submodules including already-quantized ones, then fail with:
+    Some transformers versions with bitsandbytes 0.45+ have a mismatch: the quantizer
+    integration doesn't set `is_quantized=True`, so transformers tries to randomly
+    initialize quantized (uint8 'Byte') weights, which fails with:
       NotImplementedError: "normal_kernel_cpu" not implemented for 'Byte'
-    Skipping Byte-dtype weights is safe — they are already initialised by bnb.
+
+    This patch detects Linear4bit layers and skips the initialization entirely,
+    since quantized weights are already initialized by bitsandbytes.
     """
-    from transformers.models.paligemma import modeling_paligemma as _pg
+    from transformers.modeling_utils import PreTrainedModel
 
-    _orig = _pg.PaliGemmaForConditionalGeneration._init_weights
+    _orig = PreTrainedModel._initialize_missing_keys
 
-    def _safe_init(self, module):
-        weight = getattr(module, "weight", None)
-        if weight is not None and weight.dtype == torch.uint8:
-            return  # already quantised — skip
-        try:
-            _orig(self, module)
-        except (NotImplementedError, RuntimeError):
-            pass  # other quantised sub-modules (e.g. bnb Linear4bit)
+    def _safe_initialize_missing_keys(self, checkpoint_keys, ignore_mismatched_sizes, is_quantized):
+        # If any module is Linear4bit (bitsandbytes), treat as quantized
+        if not is_quantized:
+            for module in self.modules():
+                if type(module).__name__ in ("Linear4bit", "Params4bit", "Int8Params"):
+                    is_quantized = True
+                    logger.debug("Detected bitsandbytes quantized layers, skipping weight initialization")
+                    break
 
-    _pg.PaliGemmaForConditionalGeneration._init_weights = _safe_init
+        # Call original with corrected is_quantized flag
+        return _orig(self, checkpoint_keys, ignore_mismatched_sizes, is_quantized)
+
+    PreTrainedModel._initialize_missing_keys = _safe_initialize_missing_keys
 
 
 def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArguments):
@@ -349,6 +355,28 @@ def train():
         model_args.model_name_or_path,
         token=os.environ.get("HF_TOKEN"),
     )
+
+    # Fix image_seq_length to match the image processor's actual output size.
+    # apply_chat_template uses image_seq_length to insert image-token placeholders;
+    # the vision encoder uses image_processor.size to determine how many embeddings
+    # to produce. Both must agree or the model forward pass will raise a ValueError.
+    if hasattr(processor, "image_seq_length") and hasattr(processor, "image_processor"):
+        ip = processor.image_processor
+        raw_size = getattr(ip, "size", None)
+        if isinstance(raw_size, dict):
+            h = raw_size.get("height", raw_size.get("shortest_edge", 224))
+        elif isinstance(raw_size, int):
+            h = raw_size
+        else:
+            h = 224
+        patch_size = getattr(ip, "patch_size", 14)
+        correct_seq_len = (h // patch_size) ** 2
+        if processor.image_seq_length != correct_seq_len:
+            logger.info(
+                f"Fixing image_seq_length: {processor.image_seq_length} → {correct_seq_len} "
+                f"(image_size={h}, patch_size={patch_size})"
+            )
+            processor.image_seq_length = correct_seq_len
 
     model = load_medgemma(model_args, training_args)
 
