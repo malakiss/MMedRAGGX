@@ -75,7 +75,7 @@ class ModelArguments:
 class DataArguments:
     data_path: str = field(default=None)
     image_folder: str = field(default=None)
-    max_length: int = field(default=512)   # 256 image tokens + ~256 text tokens
+    max_length: int = field(default=1024)  # 256 image tokens + ~768 text tokens
     # Remap original image_root values baked into the JSON to local paths.
     # Format: comma-separated "old_prefix:new_prefix" pairs, e.g.:
     #   "/home/wenhao/Datasets/med/rad/iu_xray/images:/mnt/d/iu_xray/images,..."
