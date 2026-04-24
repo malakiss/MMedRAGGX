@@ -75,7 +75,7 @@ class ModelArguments:
 class DataArguments:
     data_path: str = field(default=None)
     image_folder: str = field(default=None)
-    max_length: int = field(default=4352)  # 4096 image tokens + ~256 text tokens
+    max_length: int = field(default=1024)  # 256 image tokens + ~768 text tokens
     # Remap original image_root values baked into the JSON to local paths.
     # Format: comma-separated "old_prefix:new_prefix" pairs, e.g.:
     #   "/home/wenhao/Datasets/med/rad/iu_xray/images:/mnt/d/iu_xray/images,..."
@@ -353,27 +353,19 @@ def train():
         token=os.environ.get("HF_TOKEN"),
     )
 
-    # Fix image_seq_length to match the image processor's actual output size.
-    # apply_chat_template uses image_seq_length to insert image-token placeholders;
-    # the vision encoder uses image_processor.size to determine how many embeddings
-    # to produce. Both must agree or the model forward pass will raise a ValueError.
-    if hasattr(processor, "image_seq_length") and hasattr(processor, "image_processor"):
+    # The Gemma3 chat template hardcodes 256 image-token placeholders per image
+    # (corresponding to 224×224 / patch_size=14).  The image_processor, however,
+    # is configured for 896×896 and would produce 4096 embeddings — a mismatch
+    # that crashes the model forward.  Force the image_processor to 224×224 so
+    # both sides agree on 256 tokens.  image_seq_length on the processor object
+    # and image_seq_len as a template kwarg are both ignored by this template.
+    if hasattr(processor, "image_processor"):
         ip = processor.image_processor
-        raw_size = getattr(ip, "size", None)
-        if isinstance(raw_size, dict):
-            h = raw_size.get("height", raw_size.get("shortest_edge", 224))
-        elif isinstance(raw_size, int):
-            h = raw_size
-        else:
-            h = 224
-        patch_size = getattr(ip, "patch_size", 14)
-        correct_seq_len = (h // patch_size) ** 2
-        if processor.image_seq_length != correct_seq_len:
-            logger.info(
-                f"Fixing image_seq_length: {processor.image_seq_length} → {correct_seq_len} "
-                f"(image_size={h}, patch_size={patch_size})"
-            )
-            processor.image_seq_length = correct_seq_len
+        target = 224
+        ip.size = {"height": target, "width": target}
+        if hasattr(ip, "crop_size"):
+            ip.crop_size = {"height": target, "width": target}
+        logger.info(f"Forced image_processor size to {target}×{target} (→ 256 tokens, matching template)")
 
     model = load_medgemma(model_args, training_args)
 
