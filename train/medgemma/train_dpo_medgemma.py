@@ -413,10 +413,17 @@ def train():
     _base_for_cfg = getattr(getattr(model, "base_model", model), "model", model)
     image_token_id = getattr(_base_for_cfg.config, "image_token_id", None)
     if image_token_id is None:
-        tok_id = processor.tokenizer.convert_tokens_to_ids("<image_soft>")
+        tok_id = processor.tokenizer.convert_tokens_to_ids("<image_soft_token>")
         unk_id = processor.tokenizer.unk_token_id
         if tok_id != unk_id:
             image_token_id = tok_id
+    if image_token_id is None:
+    # Fallback: some versions might still use the prompt-level tag <img> 
+    # but for feature substitution, you almost always want the soft token.
+        tok_id = processor.tokenizer.convert_tokens_to_ids("<img>")
+        if tok_id != unk_id:
+            image_token_id = tok_id
+
     if image_token_id is None:
         raise RuntimeError(
             "Cannot find image_token_id in model config or tokenizer vocab. "
