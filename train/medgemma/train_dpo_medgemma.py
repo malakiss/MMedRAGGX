@@ -248,33 +248,44 @@ class MedGemmaDPOTrainer(Trainer):
 
 def _patch_init_weights_for_qlora():
     """
-    Patch `_initialize_missing_keys` at the PreTrainedModel level to handle bitsandbytes 4-bit.
+    Patch weight initialisation to handle bitsandbytes 4-bit (QLoRA).
 
-    Some transformers versions with bitsandbytes 0.45+ have a mismatch: the quantizer
-    integration doesn't set `is_quantized=True`, so transformers tries to randomly
-    initialize quantized (uint8 'Byte') weights, which fails with:
+    Some transformers versions call self.apply(self._initialize_weights) even when
+    the model is quantized, which tries to run normal_() on uint8 'Byte' tensors:
       NotImplementedError: "normal_kernel_cpu" not implemented for 'Byte'
 
-    This patch detects Linear4bit layers and skips the initialization entirely,
-    since quantized weights are already initialized by bitsandbytes.
+    Two-layer fix:
+      1. _initialize_missing_keys: skip the call entirely when quantized layers exist.
+      2. _init_weights: skip any module whose weight is already a Byte/uint8 tensor.
     """
+    import torch
     from transformers.modeling_utils import PreTrainedModel
 
-    _orig = PreTrainedModel._initialize_missing_keys
+    _bnb_types = ("Linear4bit", "Params4bit", "Int8Params", "Linear8bitLt")
+
+    # Layer 1 – skip _initialize_missing_keys wholesale when bnb layers present
+    _orig_init_missing = PreTrainedModel._initialize_missing_keys
 
     def _safe_initialize_missing_keys(self, checkpoint_keys, ignore_mismatched_sizes, is_quantized):
-        # If any module is Linear4bit (bitsandbytes), treat as quantized
         if not is_quantized:
             for module in self.modules():
-                if type(module).__name__ in ("Linear4bit", "Params4bit", "Int8Params"):
-                    is_quantized = True
-                    logger.debug("Detected bitsandbytes quantized layers, skipping weight initialization")
-                    break
-
-        # Call original with corrected is_quantized flag
-        return _orig(self, checkpoint_keys, ignore_mismatched_sizes, is_quantized)
+                if type(module).__name__ in _bnb_types:
+                    logger.debug("QLoRA detected – skipping _initialize_missing_keys")
+                    return  # quantized weights are already set by bitsandbytes
+        return _orig_init_missing(self, checkpoint_keys, ignore_mismatched_sizes, is_quantized)
 
     PreTrainedModel._initialize_missing_keys = _safe_initialize_missing_keys
+
+    # Layer 2 – guard individual _init_weights calls against Byte tensors
+    _orig_init_weights = PreTrainedModel._init_weights
+
+    def _safe_init_weights(self, module):
+        weight = getattr(module, "weight", None)
+        if weight is not None and weight.dtype == torch.uint8:
+            return  # already quantized; do not touch
+        return _orig_init_weights(self, module)
+
+    PreTrainedModel._init_weights = _safe_init_weights
 
 
 def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArguments):
