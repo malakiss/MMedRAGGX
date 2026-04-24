@@ -131,7 +131,7 @@ class MedGemmaDPOTrainer(Trainer):
         loss_mask = labels != IGNORE_INDEX
         labels[labels == IGNORE_INDEX] = 0
         per_token_logps = torch.gather(
-            logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)
+            logits.to(torch.float32).log_softmax(-1), dim=2, index=labels.unsqueeze(2)
         ).squeeze(2)
         return (per_token_logps * loss_mask).sum(-1)
 
@@ -353,7 +353,7 @@ def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArgument
             model, use_gradient_checkpointing=True
         )
         training_args.gradient_checkpointing = True  # keep Trainer in sync
-
+        
         if model_args.lora_checkpoint_path:
             logger.info(f"Resuming LoRA from {model_args.lora_checkpoint_path}")
             model = PeftModel.from_pretrained(
