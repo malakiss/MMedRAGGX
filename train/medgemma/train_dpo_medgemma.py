@@ -117,6 +117,8 @@ class MedGemmaDPOTrainer(Trainer):
         super().__init__(**kwargs)
         self.beta = beta
         self.image_token_id = image_token_id
+        self._metric_accum: Dict[str, float] = {}
+        self._metric_accum_n: int = 0
 
     # ------------------------------------------------------------------
     # Log-probability computation
@@ -274,14 +276,25 @@ class MedGemmaDPOTrainer(Trainer):
         loss = losses.mean()
 
         # ── Metrics ─────────────────────────────────────────────────────
+        # Accumulate across gradient accumulation micro-batches so each logged
+        # point corresponds to one optimizer step (not one micro-batch).
         if self.accelerator.is_main_process:
-            self.log({
+            step_metrics = {
                 "train/loss": loss.item(),
                 "train/chosen_rewards": chosen_rewards.mean().item(),
                 "train/rejected_rewards": rejected_rewards.mean().item(),
                 "train/reward_margin": (chosen_rewards - rejected_rewards).mean().item(),
                 "train/reward_accuracy": (chosen_rewards > rejected_rewards).float().mean().item(),
-            })
+            }
+            for k, v in step_metrics.items():
+                self._metric_accum[k] = self._metric_accum.get(k, 0.0) + v
+            self._metric_accum_n += 1
+
+            ga = max(1, self.args.gradient_accumulation_steps)
+            if self._metric_accum_n >= ga:
+                self.log({k: v / self._metric_accum_n for k, v in self._metric_accum.items()})
+                self._metric_accum = {}
+                self._metric_accum_n = 0
 
         return (loss, {}) if return_outputs else loss
 

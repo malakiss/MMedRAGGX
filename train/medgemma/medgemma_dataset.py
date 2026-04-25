@@ -245,6 +245,14 @@ class MedGemmaDPODataset(Dataset):
         labels[:prompt_len] = IGNORE_INDEX
         labels[input_ids == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
 
+        n_valid = (labels != IGNORE_INDEX).sum().item()
+        if n_valid == 0:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                f"All labels are IGNORE_INDEX (prompt_len={prompt_len}, max_length={self.max_length}). "
+                "Response was truncated away — increase max_length or shorten the question."
+            )
+
         return input_ids, attention_mask, pixel_values, labels
 
     # ------------------------------------------------------------------
