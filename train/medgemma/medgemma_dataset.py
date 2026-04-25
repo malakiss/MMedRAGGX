@@ -162,6 +162,12 @@ class MedGemmaDPODataset(Dataset):
         """
         if "radgraph_context" in item and item["radgraph_context"].strip():
             context_block = item["radgraph_context"]
+            # Guard against very long RAG contexts that push the prompt past
+            # max_length, leaving no room for the response (all labels → IGNORE_INDEX).
+            # ~1500 chars ≈ 375 tokens; with image (256) + system (~80) the prompt
+            # stays well under 1024, reserving ≥300 tokens for the response.
+            if len(context_block) > 1500:
+                context_block = context_block[:1500].rsplit(" ", 1)[0] + " ..."
             return (
                 "You are a professional radiologist. "
                 "Below are structured findings extracted from similar chest X-ray reports:\n\n"
@@ -224,7 +230,12 @@ class MedGemmaDPODataset(Dataset):
             images=[image],
             return_tensors="pt",
         )
-        prompt_len = prompt_enc["input_ids"].shape[1]
+        # Cap to max_length: if the untruncated prompt exceeds the budget,
+        # the full_enc only has max_length tokens; indexing beyond would be
+        # a no-op but prompt_len > max_length means the response was truncated
+        # away entirely.  The context cap in _build_question prevents this, but
+        # this is a second line of defence.
+        prompt_len = min(prompt_enc["input_ids"].shape[1], self.max_length)
 
         input_ids = full_enc["input_ids"][0]
         attention_mask = full_enc["attention_mask"][0]

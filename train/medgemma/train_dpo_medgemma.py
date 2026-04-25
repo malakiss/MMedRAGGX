@@ -358,10 +358,26 @@ def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArgument
     if training_args.lora_enable:
         # Always enable gradient checkpointing for QLoRA on constrained hardware.
         # Four DPO forward passes per step make this essential on T4/A100.
-        model = prepare_model_for_kbit_training(
-            model, use_gradient_checkpointing=True
-        )
-        training_args.gradient_checkpointing = True  # keep Trainer in sync
+        #
+        # use_reentrant=False is required when the same LoRA parameters are used
+        # in multiple forward passes per step (chosen + rejected).  The old-style
+        # reentrant checkpointing causes DDP to fire "mark variable ready" hooks
+        # twice for the same parameter, crashing with:
+        #   "Expected to mark a variable ready only once."
+        gc_kwargs = {"use_reentrant": False}
+        try:
+            model = prepare_model_for_kbit_training(
+                model,
+                use_gradient_checkpointing=True,
+                gradient_checkpointing_kwargs=gc_kwargs,
+            )
+        except TypeError:
+            # Older PEFT versions don't accept gradient_checkpointing_kwargs
+            model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gc_kwargs)
+
+        training_args.gradient_checkpointing = True            # keep Trainer in sync
+        training_args.gradient_checkpointing_kwargs = gc_kwargs  # Trainer passes this to enable()
         
         if model_args.lora_checkpoint_path:
             logger.info(f"Resuming LoRA from {model_args.lora_checkpoint_path}")
@@ -386,8 +402,10 @@ def load_medgemma(model_args: ModelArguments, training_args: DPOTrainingArgument
         try:
             base = model.base_model.model
             if hasattr(base, "vision_tower"):
-                base.vision_tower.gradient_checkpointing_enable()
-                logger.info("Vision tower gradient checkpointing enabled.")
+                base.vision_tower.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs=gc_kwargs
+                )
+                logger.info("Vision tower gradient checkpointing enabled (use_reentrant=False).")
         except Exception as e:
             logger.warning(f"Could not enable vision tower gradient checkpointing: {e}")
 
