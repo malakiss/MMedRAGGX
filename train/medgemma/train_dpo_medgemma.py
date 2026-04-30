@@ -131,6 +131,19 @@ class MedGemmaDPOTrainer(DPOTrainer):
                 "chosen_pixel_values", "rejected_pixel_values",
             ]
 
+    def log(self, logs: Dict[str, float], start_time=None) -> None:
+        # TRL 0.12.1's DPOTrainer.log() doesn't accept start_time, but newer
+        # transformers passes it.  Replicate TRL's metrics-flush logic here and
+        # call Trainer.log directly to stay compatible with both versions.
+        train_eval = "train" if "loss" in logs else "eval"
+        for key, metrics in self._stored_metrics[train_eval].items():
+            logs[key] = torch.tensor(metrics).mean().item()
+        del self._stored_metrics[train_eval]
+        if start_time is not None:
+            super(DPOTrainer, self).log(logs, start_time)
+        else:
+            super(DPOTrainer, self).log(logs)
+
     # ------------------------------------------------------------------
     # Log-probability computation
     # ------------------------------------------------------------------
