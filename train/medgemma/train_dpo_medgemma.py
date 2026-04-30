@@ -24,24 +24,20 @@ from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import transformers
 import wandb
+from datasets import Dataset as HFDataset
 from peft import (
     LoraConfig,
     PeftModel,
     get_peft_model,
     prepare_model_for_kbit_training,
 )
-from torch.utils.data import DataLoader
 from transformers import (
     AutoProcessor,
     BitsAndBytesConfig,
     HfArgumentParser,
-    Trainer,
-    TrainingArguments,
 )
-from transformers.modeling_outputs import BaseModelOutput
+from trl import DPOConfig, DPOTrainer
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO)
@@ -86,8 +82,7 @@ class DataArguments:
 
 
 @dataclass
-class DPOTrainingArguments(TrainingArguments):
-    beta: float = field(default=0.1)
+class DPOTrainingArguments(DPOConfig):
     lora_enable: bool = field(default=True)
     lora_r: int = field(default=64)       # 128 → 64: halves LoRA + optimizer memory
     lora_alpha: int = field(default=128)  # keep ratio lora_alpha/lora_r = 2
@@ -100,25 +95,38 @@ class DPOTrainingArguments(TrainingArguments):
 # Custom DPO trainer
 # ---------------------------------------------------------------------------
 
-class MedGemmaDPOTrainer(Trainer):
+class MedGemmaDPOTrainer(DPOTrainer):
     """
-    DPO sigmoid-loss trainer for MedGemma (Gemma3ForConditionalGeneration + SigLIP).
+    DPO trainer for MedGemma (Gemma3ForConditionalGeneration + SigLIP).
 
-    Memory-efficient design: SigLIP (896×896 → 4096 patches) runs exactly TWICE
-    per step (once for chosen, once for rejected), always inside torch.no_grad()
-    and with the result detached.  The 4 log-prob computations (policy × 2,
-    reference × 2) then run as LM-only passes with pre-built inputs_embeds,
-    avoiding the 1024 MB SigLIP attention allocation that causes OOM on T4s.
+    Inherits from trl.DPOTrainer for proper DPO infrastructure: loss variants
+    (sigmoid/hinge/ipo/…), null_ref_context for PEFT reference model, and
+    store_metrics/log integration.  compute_loss is overridden for the
+    multimodal-specific forward pass: SigLIP runs once per image (no_grad +
+    detach), then 4 LM-only passes (policy chosen/rejected, ref chosen/rejected).
 
-    Reference model = same PeftModel with LoRA adapters disabled — no 2nd copy.
+    Dataset is pre-tokenised (MedGemmaDPODataset), so __init__ bypasses TRL's
+    .map()-based tokenisation by passing a dummy empty HF Dataset, then swapping
+    in the real dataset after super().__init__() completes.
     """
 
-    def __init__(self, beta: float = 0.1, image_token_id: int = None, **kwargs):
-        super().__init__(**kwargs)
-        self.beta = beta
+    def __init__(self, image_token_id: int = None, train_dataset=None, **kwargs):
+        # TRL's DPOTrainer.__init__ calls train_dataset.map(...) which requires a
+        # HuggingFace datasets.Dataset.  Our MedGemmaDPODataset is a pre-tokenised
+        # torch.utils.data.Dataset, so we pass an empty HF Dataset to let TRL
+        # complete its attribute setup, then swap in the real dataset.
+        fake_ds = HFDataset.from_dict({"prompt": [], "chosen": [], "rejected": []})
+        super().__init__(train_dataset=fake_ds, **kwargs)
+        self.train_dataset = train_dataset
         self.image_token_id = image_token_id
-        self._metric_accum: Dict[str, float] = {}
-        self._metric_accum_n: int = 0
+
+    def _set_signature_columns_if_needed(self):
+        if self._signature_columns is None:
+            self._signature_columns = [
+                "chosen_input_ids", "chosen_attention_mask", "chosen_labels",
+                "rejected_input_ids", "rejected_attention_mask", "rejected_labels",
+                "chosen_pixel_values", "rejected_pixel_values",
+            ]
 
     # ------------------------------------------------------------------
     # Log-probability computation
@@ -140,25 +148,6 @@ class MedGemmaDPOTrainer(Trainer):
         # sequence length — prevents sigmoid saturation and grad underflow.
         n_tokens = loss_mask.sum(-1).clamp(min=1)
         return (per_token_logps * loss_mask).sum(-1) / n_tokens
-
-    # ------------------------------------------------------------------
-    # DPO loss
-    # ------------------------------------------------------------------
-
-    def _dpo_loss(
-        self,
-        policy_chosen_logps: torch.FloatTensor,
-        policy_rejected_logps: torch.FloatTensor,
-        ref_chosen_logps: torch.FloatTensor,
-        ref_rejected_logps: torch.FloatTensor,
-    ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
-        pi_logratios = policy_chosen_logps - policy_rejected_logps
-        ref_logratios = ref_chosen_logps - ref_rejected_logps
-        logits = pi_logratios - ref_logratios
-        losses = -F.logsigmoid(self.beta * logits)
-        chosen_rewards = self.beta * (policy_chosen_logps - ref_chosen_logps).detach()
-        rejected_rewards = self.beta * (policy_rejected_logps - ref_rejected_logps).detach()
-        return losses, chosen_rewards, rejected_rewards
 
     # ------------------------------------------------------------------
     # Vision feature pre-computation + inputs_embeds construction
@@ -260,44 +249,30 @@ class MedGemmaDPOTrainer(Trainer):
             inputs["rejected_attention_mask"], inputs["rejected_labels"],
         )
 
-        # ── Reference: chosen + rejected (LoRA disabled, no grad) ───────
-        with torch.no_grad():
-            with unwrapped.disable_adapter():
-                ref_chosen_logps = self._forward(
-                    model, chosen_embeds.detach(),
-                    inputs["chosen_attention_mask"], inputs["chosen_labels"],
-                )
-                ref_rejected_logps = self._forward(
-                    model, rejected_embeds.detach(),
-                    inputs["rejected_attention_mask"], inputs["rejected_labels"],
-                )
+        # ── Reference: chosen + rejected (LoRA disabled via null_ref_context) ─
+        with torch.no_grad(), self.null_ref_context():
+            ref_chosen_logps = self._forward(
+                model, chosen_embeds.detach(),
+                inputs["chosen_attention_mask"], inputs["chosen_labels"],
+            )
+            ref_rejected_logps = self._forward(
+                model, rejected_embeds.detach(),
+                inputs["rejected_attention_mask"], inputs["rejected_labels"],
+            )
 
-        losses, chosen_rewards, rejected_rewards = self._dpo_loss(
+        losses, chosen_rewards, rejected_rewards = self.dpo_loss(
             policy_chosen_logps, policy_rejected_logps,
             ref_chosen_logps, ref_rejected_logps,
         )
         loss = losses.mean()
 
-        # ── Metrics ─────────────────────────────────────────────────────
-        # Accumulate across gradient accumulation micro-batches so each logged
-        # point corresponds to one optimizer step (not one micro-batch).
-        if self.accelerator.is_main_process:
-            step_metrics = {
-                "train/loss": loss.item(),
-                "train/chosen_rewards": chosen_rewards.mean().item(),
-                "train/rejected_rewards": rejected_rewards.mean().item(),
-                "train/reward_margin": (chosen_rewards - rejected_rewards).mean().item(),
-                "train/reward_accuracy": (chosen_rewards > rejected_rewards).float().mean().item(),
-            }
-            for k, v in step_metrics.items():
-                self._metric_accum[k] = self._metric_accum.get(k, 0.0) + v
-            self._metric_accum_n += 1
-
-            ga = max(1, self.args.gradient_accumulation_steps)
-            if self._metric_accum_n >= ga:
-                self.log({k: v / self._metric_accum_n for k, v in self._metric_accum.items()})
-                self._metric_accum = {}
-                self._metric_accum_n = 0
+        # ── Metrics — stored via TRL's store_metrics/log pipeline ───────
+        self.store_metrics({
+            "rewards/chosen": chosen_rewards.mean().item(),
+            "rewards/rejected": rejected_rewards.mean().item(),
+            "rewards/accuracies": (chosen_rewards > rejected_rewards).float().mean().item(),
+            "rewards/margins": (chosen_rewards - rejected_rewards).mean().item(),
+        }, train_eval="train")
 
         return (loss, {}) if return_outputs else loss
 
@@ -502,12 +477,13 @@ def train():
     )
 
     trainer = MedGemmaDPOTrainer(
-        beta=training_args.beta,
         image_token_id=image_token_id,
         model=model,
         args=training_args,
         train_dataset=dataset,
         data_collator=collator,
+        processing_class=processor,
+        ref_model=None,  # PEFT model → null_ref_context uses disable_adapter()
     )
 
     logger.info("Starting DPO training ...")
