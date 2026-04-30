@@ -71,7 +71,8 @@ class ModelArguments:
 class DataArguments:
     data_path: str = field(default=None)
     image_folder: str = field(default=None)
-    max_length: int = field(default=1024)  # 256 image tokens + ~768 text tokens
+    # max_length lives in DPOTrainingArguments (DPOConfig.max_length) to avoid
+    # argparse conflicts — both classes would otherwise register --max_length.
     # Remap original image_root values baked into the JSON to local paths.
     # Format: comma-separated "old_prefix:new_prefix" pairs, e.g.:
     #   "/home/wenhao/Datasets/med/rad/iu_xray/images:/mnt/d/iu_xray/images,..."
@@ -83,6 +84,8 @@ class DataArguments:
 
 @dataclass
 class DPOTrainingArguments(DPOConfig):
+    # Override DPOConfig.max_length default (None) to 1024: 256 image tokens + ~768 text tokens
+    max_length: Optional[int] = field(default=1024)
     lora_enable: bool = field(default=True)
     lora_r: int = field(default=64)       # 128 → 64: halves LoRA + optimizer memory
     lora_alpha: int = field(default=128)  # keep ratio lora_alpha/lora_r = 2
@@ -466,7 +469,7 @@ def train():
         data_path=data_args.data_path,
         processor=processor,
         image_folder=data_args.image_folder,
-        max_length=data_args.max_length,
+        max_length=training_args.max_length,
         root_remap=root_remap,
         fallback_image_folders=fallback_roots,
     )
