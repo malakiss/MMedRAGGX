@@ -92,6 +92,11 @@ class DPOTrainingArguments(DPOConfig):
     lora_dropout: float = field(default=0.05)
     remove_unused_columns: bool = field(default=False)
     optim: str = field(default="adamw_bnb_8bit")  # 8-bit optimizer: saves ~1 GB vs fp32 AdamW
+    # Asymmetric DPO loss weights.  chosen = ground-truth reports, rejected = GPT
+    # responses, so we weight the positive (chosen) direction more heavily.
+    # Standard symmetric DPO: both = 1.0.  Recommended starting point: 1.5 / 0.5.
+    chosen_loss_weight: float = field(default=1.0)
+    rejected_loss_weight: float = field(default=1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +127,8 @@ class MedGemmaDPOTrainer(DPOTrainer):
         super().__init__(train_dataset=fake_ds, **kwargs)
         self.train_dataset = train_dataset
         self.image_token_id = image_token_id
+        self.chosen_loss_weight = self.args.chosen_loss_weight
+        self.rejected_loss_weight = self.args.rejected_loss_weight
 
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
@@ -143,6 +150,20 @@ class MedGemmaDPOTrainer(DPOTrainer):
             super(DPOTrainer, self).log(logs, start_time)
         else:
             super(DPOTrainer, self).log(logs)
+
+    def dpo_loss(self, chosen_logps, rejected_logps, ref_chosen_logps, ref_rejected_logps):
+        import torch.nn.functional as F
+        device = self.accelerator.device
+        chosen_logratios  = chosen_logps.to(device)  - ref_chosen_logps.to(device)
+        rejected_logratios = rejected_logps.to(device) - ref_rejected_logps.to(device)
+        # Decomposed asymmetric loss: weight chosen (ground truth) and rejected
+        # (GPT response) independently instead of combining into a single sigmoid.
+        chosen_loss   = -F.logsigmoid( self.beta * chosen_logratios)
+        rejected_loss = -F.logsigmoid(-self.beta * rejected_logratios)
+        losses = self.chosen_loss_weight * chosen_loss + self.rejected_loss_weight * rejected_loss
+        chosen_rewards   = (self.beta * chosen_logratios).detach()
+        rejected_rewards = (self.beta * rejected_logratios).detach()
+        return losses, chosen_rewards, rejected_rewards
 
     # ------------------------------------------------------------------
     # Log-probability computation
