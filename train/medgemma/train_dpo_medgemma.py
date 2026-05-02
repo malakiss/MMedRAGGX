@@ -160,10 +160,7 @@ class MedGemmaDPOTrainer(DPOTrainer):
         per_token_logps = torch.gather(
             logits.to(torch.float32).log_softmax(-1), dim=2, index=labels.unsqueeze(2)
         ).squeeze(2)
-        # Normalize by number of response tokens so rewards don't scale with
-        # sequence length — prevents sigmoid saturation and grad underflow.
-        n_tokens = loss_mask.sum(-1).clamp(min=1)
-        return (per_token_logps * loss_mask).sum(-1) / n_tokens
+        return (per_token_logps * loss_mask).sum(-1)
 
     # ------------------------------------------------------------------
     # Vision feature pre-computation + inputs_embeds construction
